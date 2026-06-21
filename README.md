@@ -11,10 +11,6 @@ The project uses an agent-based evolutionary simulation to study how third-party
 Files
 ESG — main Python simulation script
 
-figures — generated manuscript figures
-
-outputs — generated CSV/result files
-
 Reproducibility:
 
 The manuscript results are generated using seed = 42 for both certification scenarios. Running the script recreates the main simulation outputs used in the paper.
