@@ -1,4 +1,4 @@
-ESG Signaling, Certifier Credibility, and Greenwashing
+<h1> ESG Signaling, Certifier Credibility, and Greenwashing </h1>
 
 This repository contains the Python simulation code and replication materials for the paper:
 
