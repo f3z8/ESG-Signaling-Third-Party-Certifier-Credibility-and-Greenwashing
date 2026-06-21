@@ -18,8 +18,6 @@ The simulation tracks greenwashing persistence, greenwashing investment success,
 ## Repository Contents
 
 - `esg_certifier_simulation.py` — main Python simulation script
-- `figures/` — generated manuscript figures
-- `outputs/` — generated CSV result files
 - `requirements.txt` — Python package requirements
 - `manuscript.pdf` — paper draft
 - `LICENSE` — repository license
