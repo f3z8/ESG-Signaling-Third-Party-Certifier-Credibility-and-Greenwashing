@@ -1,0 +1,551 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from matplotlib.lines import Line2D
+from scipy.ndimage import uniform_filter1d
+import warnings
+from pathlib import Path
+warnings.filterwarnings('ignore')
+
+BLUE   = "#1A5F7A"
+ROSE   = "#C0392B"
+BLUE_L = "#5B9BB5"
+ROSE_L = "#E07B71"
+BG     = "#FAFAFA"
+GRID   = "#E0E0E0"
+
+plt.rcParams.update({
+    "font.family":        "serif",
+    "font.serif":         ["Georgia", "Times New Roman", "DejaVu Serif"],
+    "axes.facecolor":     BG,
+    "figure.facecolor":   "white",
+    "axes.spines.top":    False,
+    "axes.spines.right":  False,
+    "axes.spines.left":   True,
+    "axes.spines.bottom": True,
+    "axes.edgecolor":     "#AAAAAA",
+    "axes.linewidth":     0.8,
+    "axes.grid":          True,
+    "grid.color":         GRID,
+    "grid.linewidth":     0.6,
+    "grid.linestyle":     "--",
+    "xtick.labelsize":    9,
+    "ytick.labelsize":    9,
+    "axes.labelsize":     10,
+    "axes.titlesize":     11,
+    "axes.titlepad":      10,
+    "axes.labelpad":      6,
+    "legend.fontsize":    9,
+    "legend.framealpha":  0.9,
+    "legend.edgecolor":   "#CCCCCC",
+    "legend.fancybox":    False,
+    "figure.dpi":         150,
+    "savefig.dpi":        300,
+})
+
+def smooth(y, w=7):
+    return uniform_filter1d(y.astype(float), size=w)
+
+
+class ESGMarketSimulation:
+
+    def __init__(self, num_firms=500, num_periods=100, seed=None):
+        self.num_firms   = num_firms
+        self.num_periods = num_periods
+        if seed is not None:
+            np.random.seed(seed)
+
+        self.cost_genuine_esg          = 0.4
+        self.cost_greenwashing         = 0.1
+        self.certifier_accuracy_high   = 0.90
+        self.certifier_accuracy_low    = 0.60
+        self.certifier_reputation_gain = 0.1
+        self.base_return               = 1.0
+        self.esg_premium               = 0.5
+        self.greenwashing_penalty      = 0.6
+        self.warm_glow_bias            = 0.15
+        self.skepticism_threshold      = 0.7
+        self.mutation_rate             = 0.05
+        self.imitation_strength        = 0.3
+
+        self._init_market()
+
+    def _init_market(self):
+        self.firm_types          = np.random.choice([0, 1], self.num_firms, p=[0.5, 0.5])
+        self.esg_quality         = np.zeros(self.num_firms)
+        self._refresh_quality(np.arange(self.num_firms))
+        self.historical_returns  = []
+        self.certifier_reputation = 0.8
+        self.investor_trust       = 0.7
+        self.certifier_perf_hist  = []
+
+    def _refresh_quality(self, indices):
+        for i in indices:
+            if self.firm_types[i] == 0:
+                self.esg_quality[i] = np.random.beta(8, 2)
+            else:
+                self.esg_quality[i] = np.random.beta(2, 8)
+
+    def _update_history(self, returns):
+        if len(self.historical_returns) >= 5:
+            self.historical_returns.pop(0)
+        self.historical_returns.append(returns)
+
+    def _avg_return_by_type(self, t):
+        vals = []
+        mask = self.firm_types == t
+        for r in self.historical_returns:
+            if mask.any():
+                vals.extend(r[mask])
+        return np.mean(vals) if vals else 0.0
+
+    def _evolve_firms(self, returns):
+        avg_g  = self._avg_return_by_type(0)
+        avg_gw = self._avg_return_by_type(1)
+        new_types = self.firm_types.copy()
+        for i in range(self.num_firms):
+            if np.random.random() < self.imitation_strength:
+                cur = returns[i]
+                if self.firm_types[i] == 0 and avg_gw > avg_g * 1.2 and avg_gw > cur * 1.1:
+                    new_types[i] = 1
+                elif self.firm_types[i] == 1 and avg_g > avg_gw * 1.2 and avg_g > cur * 1.1:
+                    new_types[i] = 0
+            if np.random.random() < self.mutation_rate:
+                new_types[i] = 1 - new_types[i]
+        changed = np.where(new_types != self.firm_types)[0]
+        self.firm_types = new_types
+        if len(changed):
+            self._refresh_quality(changed)
+
+    def _certify(self, accuracy):
+        cert    = np.zeros(self.num_firms, dtype=bool)
+        correct = np.zeros(self.num_firms, dtype=bool)
+        for i in range(self.num_firms):
+            if self.firm_types[i] == 0:
+                cert[i]    = np.random.random() < accuracy
+                correct[i] = cert[i]
+            else:
+                cert[i]    = np.random.random() < (1 - accuracy)
+                correct[i] = not cert[i]
+        perf = correct.mean()
+        self.certifier_reputation = float(np.clip(
+            self.certifier_reputation + self.certifier_reputation_gain * (perf - self.certifier_reputation),
+            0.1, 1.0))
+        self.certifier_perf_hist.append(perf)
+        return cert
+
+    def _invest(self, cert):
+        invest  = np.zeros(self.num_firms, dtype=bool)
+        returns = np.zeros(self.num_firms)
+        tf      = self.investor_trust * self.certifier_reputation
+
+        for i in range(self.num_firms):
+            if cert[i]:
+                if self.firm_types[i] == 0:
+                    fin = self.base_return + self.esg_premium - self.cost_genuine_esg
+                else:
+                    fin = self.base_return - self.cost_greenwashing
+
+                utility = fin * tf + self.warm_glow_bias * (0.5 + 0.5 * self.esg_quality[i]) + 0.1 * self.esg_quality[i]
+                prob    = 1 / (1 + np.exp(-10 * (utility - self.skepticism_threshold)))
+
+                if np.random.random() < prob:
+                    invest[i] = True
+                    if self.firm_types[i] == 0:
+                        returns[i] = fin
+                    else:
+                        disc_p = self.certifier_reputation * 0.7 * (1 - self.esg_quality[i])
+                        returns[i] = fin - self.greenwashing_penalty if np.random.random() < disc_p else fin
+            else:
+                returns[i] = (self.base_return * 0.5 - self.cost_genuine_esg
+                              if self.firm_types[i] == 0
+                              else self.base_return * 0.5 - self.cost_greenwashing)
+
+        successes = [1 if self.firm_types[i] == 0 else 0 for i in range(self.num_firms) if invest[i]]
+        if successes:
+            self.investor_trust = 0.8 * self.investor_trust + 0.2 * np.mean(successes)
+        else:
+            self.investor_trust *= 0.95
+
+        return invest, returns
+
+    def simulate_period(self, period, certifier_type):
+        snap = self.firm_types.copy()
+        accuracy = self.certifier_accuracy_high if certifier_type == "high" else self.certifier_accuracy_low
+        cert    = self._certify(accuracy)
+        inv, ret = self._invest(cert)
+
+        if period > 0:
+            self._update_history(ret)
+        self._evolve_firms(ret)
+
+        gw_inv = inv & (snap == 1)
+        n_gw   = (snap == 1).sum()
+        gs     = gw_inv.sum() / n_gw if n_gw > 0 else 0.0
+
+        invested = inv.sum()
+        if invested:
+            isr = np.mean([1 if snap[i] == 0 else 0 for i in range(self.num_firms) if inv[i]])
+        else:
+            isr = 0.0
+
+        return {
+            "period":                  period,
+            "greenwashing_proportion": snap.mean(),
+            "greenwashing_success":    gs,
+            "investment_rate":         inv.mean(),
+            "avg_return":              ret[inv].mean() if invested else 0.0,
+            "certifier_reputation":    self.certifier_reputation,
+            "investor_trust":          self.investor_trust,
+            "certifier_performance":   self.certifier_perf_hist[-1],
+            "investment_success_rate": isr,
+            "avg_genuine_esg_quality": self.esg_quality[snap == 0].mean() if (snap == 0).any() else 0.0,
+            "avg_greenwash_esg_quality": self.esg_quality[snap == 1].mean() if (snap == 1).any() else 0.0,
+        }
+
+    def run_simulation(self, certifier_type="high"):
+        return pd.DataFrame([self.simulate_period(p, certifier_type) for p in range(self.num_periods)])
+
+    def analyze_equilibrium(self, df):
+        last = df.tail(30)
+        avg_gw  = last["greenwashing_proportion"].mean()
+        std_gw  = last["greenwashing_proportion"].std()
+        avg_gs  = last["greenwashing_success"].mean()
+        avg_isr = last["investment_success_rate"].mean()
+
+        if avg_gw < 0.25 and avg_gs < 0.35:
+            eq_type = "Separating-like outcome"
+            eq_desc = "Market effectively distinguishes genuine from deceptive firms"
+        elif avg_gw > 0.55 and avg_gs > 0.45:
+            eq_type = "Pooling-like outcome (greenwashing dominant)"
+            eq_desc = "Market fails to distinguish genuine from deceptive firms"
+        elif std_gw < 0.08 and 0.25 <= avg_gw <= 0.55:
+            eq_type = "Mixed outcome"
+            eq_desc = "Both strategies coexist with stable proportions"
+        else:
+            eq_type = "Partial separating outcome"
+            eq_desc = "Market has partially self-corrected but retains residual greenwashing"
+
+        return {
+            "equilibrium_type":        eq_type,
+            "explanation":             eq_desc,
+            "avg_greenwashing":        avg_gw,
+            "greenwashing_stability":  std_gw,
+            "greenwashing_success":    avg_gs,
+            "investment_success_rate": avg_isr,
+            "final_certifier_rep":     df["certifier_reputation"].iloc[-1],
+            "final_investor_trust":    df["investor_trust"].iloc[-1],
+            "avg_genuine_quality":     df["avg_genuine_esg_quality"].mean(),
+            "avg_greenwash_quality":   df["avg_greenwash_esg_quality"].mean(),
+        }
+
+
+def label(ax, letter, title, subtitle=""):
+    ax.set_title(f"({letter})  {title}" + (f"\n{subtitle}" if subtitle else ""),
+                 fontsize=11, fontweight="bold", loc="left", pad=8)
+
+def add_legend(ax, colors, labels, styles=None):
+    handles = [Line2D([0], [0], color=c, lw=2,
+                      linestyle=(styles[i] if styles else "-"),
+                      label=labels[i]) for i, c in enumerate(colors)]
+    ax.legend(handles=handles, framealpha=0.9, edgecolor="#CCCCCC",
+              fontsize=9, loc="best")
+
+def shade_band(ax, series, w=7, alpha=0.12, color="gray"):
+    s = pd.Series(series).rolling(w, min_periods=1)
+    ax.fill_between(range(len(series)), s.min(), s.max(), color=color, alpha=alpha)
+
+
+def create_combined_figure(hr, lr, heq, leq, out="esg_combined_figure.png"):
+    periods = np.arange(len(hr))
+    fig = plt.figure(figsize=(16, 20), facecolor="white")
+    gs  = gridspec.GridSpec(4, 2, figure=fig, hspace=0.52, wspace=0.32,
+                            left=0.07, right=0.97, top=0.93, bottom=0.05)
+    axes = [[fig.add_subplot(gs[r, c]) for c in range(2)] for r in range(4)]
+
+    for row in axes:
+        for ax in row:
+            ax.set_xlim(0, len(hr) - 1)
+            ax.set_xlabel("Time Period", fontsize=10)
+            ax.tick_params(axis="both", labelsize=9)
+
+    fig.suptitle(
+        "ESG Signaling Dynamics: High vs. Low Credibility Certification Markets",
+        fontsize=14, fontweight="bold", y=0.965)
+
+    sub = fig.text(0.5, 0.948,
+        "Evolutionary game-theoretic simulation  ·  500 firms  ·  100 periods",
+        ha="center", fontsize=9.5, color="#555555", style="italic")
+
+    ax = axes[0][0]
+    ax.plot(periods, smooth(hr["greenwashing_proportion"]), color=BLUE, lw=2.2, label="High Credibility")
+    ax.plot(periods, smooth(lr["greenwashing_proportion"]), color=ROSE, lw=2.2, label="Low Credibility")
+    shade_band(ax, hr["greenwashing_proportion"], color=BLUE)
+    shade_band(ax, lr["greenwashing_proportion"], color=ROSE)
+    ax.axhline(0.5, color="#AAAAAA", ls="--", lw=1, alpha=0.6)
+    ax.set_ylim(0, 1); ax.set_ylabel("Proportion of Greenwashers")
+    ax.legend(fontsize=9, loc="upper right")
+    label(ax, "A", "Evolution of Greenwashing Proportion")
+
+    ax = axes[0][1]
+    ax.plot(periods, smooth(hr["greenwashing_success"], 10), color=BLUE, lw=2.2, label="High Credibility")
+    ax.plot(periods, smooth(lr["greenwashing_success"], 10), color=ROSE, lw=2.2, label="Low Credibility")
+    shade_band(ax, hr["greenwashing_success"], 10, color=BLUE)
+    shade_band(ax, lr["greenwashing_success"], 10, color=ROSE)
+    ax.set_ylim(0, 0.8); ax.set_ylabel("Success Rate")
+    ax.legend(fontsize=9, loc="upper right")
+    label(ax, "B", "Greenwashing Investment Success Rate")
+
+    for col, df, color, lcolor, title_letter in [
+        (0, hr, BLUE, BLUE_L, "C"),
+        (1, lr, ROSE, ROSE_L, "D"),
+    ]:
+        ax = axes[1][col]
+        ax.plot(periods, smooth(df["avg_genuine_esg_quality"]),   color=color,  lw=2.2, ls="-",  label="Genuine Firms")
+        ax.plot(periods, smooth(df["avg_greenwash_esg_quality"]), color=lcolor, lw=2.0, ls="--", label="Greenwashing Firms")
+        ax.fill_between(periods,
+                        smooth(df["avg_greenwash_esg_quality"]),
+                        smooth(df["avg_genuine_esg_quality"]),
+                        alpha=0.07, color=color)
+        ax.set_ylim(0, 1); ax.set_ylabel("Average ESG Quality Score")
+        ax.legend(fontsize=9, loc="center right")
+        cred = "High Credibility" if col == 0 else "Low Credibility"
+        label(ax, title_letter, f"ESG Quality Distribution — {cred}")
+
+    ax = axes[2][0]
+    ax.plot(periods, smooth(hr["certifier_reputation"]), color=BLUE, lw=2.2, label="High Credibility")
+    ax.plot(periods, smooth(lr["certifier_reputation"]), color=ROSE, lw=2.2, label="Low Credibility")
+    ax.axhline(heq["final_certifier_rep"], color=BLUE, lw=1, ls=":", alpha=0.6)
+    ax.axhline(leq["final_certifier_rep"], color=ROSE, lw=1, ls=":", alpha=0.6)
+    ax.set_ylim(0.4, 1.0); ax.set_ylabel("Certifier Reputation Score")
+    ax.legend(fontsize=9, loc="center right")
+    label(ax, "E", "Evolution of Certifier Reputation")
+
+    ax = axes[2][1]
+    ax.plot(periods, smooth(hr["investor_trust"]), color=BLUE, lw=2.2, label="High Credibility")
+    ax.plot(periods, smooth(lr["investor_trust"]), color=ROSE, lw=2.2, label="Low Credibility")
+    ax.set_ylim(0.5, 1.0); ax.set_ylabel("Investor Trust Level")
+    ax.legend(fontsize=9, loc="lower right")
+    label(ax, "F", "Evolution of Investor Trust")
+
+    ax = axes[3][0]
+    ax.plot(periods, smooth(hr["investment_success_rate"]), color=BLUE, lw=2.2, label="High Credibility")
+    ax.plot(periods, smooth(lr["investment_success_rate"]), color=ROSE, lw=2.2, label="Low Credibility")
+    ax.set_ylim(0.5, 1.0); ax.set_ylabel("Investor Decision Success Rate")
+    ax.legend(fontsize=9, loc="lower right")
+    label(ax, "G", "Investor Decision Success Rate")
+
+    ax = axes[3][1]
+    ax.axis("off")
+    metrics = [
+        ("Equilibrium Type",       heq["equilibrium_type"],          leq["equilibrium_type"]),
+        ("Final Greenwashing",      f"{heq['avg_greenwashing']:.1%}", f"{leq['avg_greenwashing']:.1%}"),
+        ("Greenwashing Success",    f"{heq['greenwashing_success']:.1%}", f"{leq['greenwashing_success']:.1%}"),
+        ("Investor Success Rate",   f"{heq['investment_success_rate']:.1%}", f"{leq['investment_success_rate']:.1%}"),
+        ("Final Investor Trust",    f"{heq['final_investor_trust']:.3f}",  f"{leq['final_investor_trust']:.3f}"),
+        ("Certifier Reputation",    f"{heq['final_certifier_rep']:.3f}",   f"{leq['final_certifier_rep']:.3f}"),
+        ("ESG Quality Gap",         f"{(heq['avg_genuine_quality']-heq['avg_greenwash_quality']):.1%}",
+                                    f"{(leq['avg_genuine_quality']-leq['avg_greenwash_quality']):.1%}"),
+    ]
+
+    col_w = [0.44, 0.28, 0.28]
+    headers = ["Metric", "High Cred.", "Low Cred."]
+    head_colors = ["#1A3A4A", BLUE, ROSE]
+    y0, row_h = 0.97, 0.115
+
+    for ci, (hdr, hcol) in enumerate(zip(headers, head_colors)):
+        x = sum(col_w[:ci]) + col_w[ci] / 2
+        ax.text(x, y0, hdr, transform=ax.transAxes, fontsize=9.5, fontweight="bold",
+                color=hcol if ci > 0 else "white",
+                ha="center", va="top",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="#1A3A4A" if ci == 0 else "#F0F4F7",
+                          edgecolor="none") if ci == 0 else None)
+
+    for ri, (m, hv, lv) in enumerate(metrics):
+        y = y0 - row_h * (ri + 1)
+        bg = "#F8F8F8" if ri % 2 == 0 else "white"
+        ax.add_patch(plt.Rectangle((0, y - 0.04), 1, row_h - 0.01,
+                                    transform=ax.transAxes, color=bg, zorder=0))
+        ax.text(sum(col_w[:0]) + 0.01, y, m,   transform=ax.transAxes, fontsize=8.5, va="top", fontweight="bold" if ri == 0 else "normal")
+        ax.text(sum(col_w[:1]) + col_w[1]/2, y, hv, transform=ax.transAxes, fontsize=8.5, va="top", ha="center", color=BLUE)
+        ax.text(sum(col_w[:2]) + col_w[2]/2, y, lv, transform=ax.transAxes, fontsize=8.5, va="top", ha="center", color=ROSE)
+
+    ax.text(0.5, -0.04,
+        "Note: Lines smoothed with 7-period moving average for visual clarity. Shaded bands indicate raw period variance.",
+        transform=ax.transAxes, fontsize=7.5, color="#888888", ha="center", style="italic")
+
+    label(ax, "H", "Summary of Equilibrium Outcomes")
+
+    plt.savefig(out, dpi=300, bbox_inches="tight", facecolor="white")
+    print(f"Saved: {out}")
+    plt.show()
+
+
+def create_individual_figures(hr, lr, out_prefix="esg_fig"):
+    periods = np.arange(len(hr))
+
+    specs = [
+        {
+            "fn":    f"{out_prefix}_A_greenwashing_proportion.png",
+            "title": "Evolution of Greenwashing Proportion",
+            "letter": "A",
+            "ylabel": "Proportion of Greenwashing Firms",
+            "ylim":   (0, 1),
+            "series": [
+                (hr["greenwashing_proportion"], BLUE, "-",  "High Credibility"),
+                (lr["greenwashing_proportion"], ROSE, "-",  "Low Credibility"),
+            ],
+            "hline": 0.5,
+        },
+        {
+            "fn":    f"{out_prefix}_B_gw_success.png",
+            "title": "Greenwashing Investment Success Rate",
+            "letter": "B",
+            "ylabel": "Success Rate",
+            "ylim":   (0, 0.8),
+            "series": [
+                (hr["greenwashing_success"], BLUE, "-", "High Credibility"),
+                (lr["greenwashing_success"], ROSE, "-", "Low Credibility"),
+            ],
+            "smooth_w": 10,
+        },
+        {
+            "fn":    f"{out_prefix}_CD_esg_quality.png",
+            "title": "ESG Quality Distributions by Certifier Scenario",
+            "letter": "C / D",
+            "ylabel": "Average ESG Quality Score",
+            "ylim":   (0, 1),
+            "series": [
+                (hr["avg_genuine_esg_quality"],   BLUE,  "-",  "Genuine — High Cred."),
+                (hr["avg_greenwash_esg_quality"], BLUE_L, "--", "Greenwash — High Cred."),
+                (lr["avg_genuine_esg_quality"],   ROSE,  "-",  "Genuine — Low Cred."),
+                (lr["avg_greenwash_esg_quality"], ROSE_L, "--", "Greenwash — Low Cred."),
+            ],
+        },
+        {
+            "fn":    f"{out_prefix}_E_certifier_rep.png",
+            "title": "Evolution of Certifier Reputation",
+            "letter": "E",
+            "ylabel": "Certifier Reputation Score",
+            "ylim":   (0.4, 1.0),
+            "series": [
+                (hr["certifier_reputation"], BLUE, "-", "High Credibility"),
+                (lr["certifier_reputation"], ROSE, "-", "Low Credibility"),
+            ],
+        },
+        {
+            "fn":    f"{out_prefix}_F_investor_trust.png",
+            "title": "Evolution of Investor Trust",
+            "letter": "F",
+            "ylabel": "Investor Trust Level",
+            "ylim":   (0.5, 1.0),
+            "series": [
+                (hr["investor_trust"], BLUE, "-", "High Credibility"),
+                (lr["investor_trust"], ROSE, "-", "Low Credibility"),
+            ],
+        },
+        {
+            "fn":    f"{out_prefix}_G_investor_success.png",
+            "title": "Investor Decision Success Rate",
+            "letter": "G",
+            "ylabel": "Investor Decision Success Rate",
+            "ylim":   (0.5, 1.0),
+            "series": [
+                (hr["investment_success_rate"], BLUE, "-", "High Credibility"),
+                (lr["investment_success_rate"], ROSE, "-", "Low Credibility"),
+            ],
+        },
+    ]
+
+    for sp in specs:
+        fig, ax = plt.subplots(figsize=(8, 4.8))
+        w = sp.get("smooth_w", 7)
+        for (series, color, ls, lbl) in sp["series"]:
+            raw = np.array(series)
+            ax.plot(periods, smooth(raw, w), color=color, lw=2.2, ls=ls, label=lbl)
+            ax.fill_between(periods,
+                            pd.Series(raw).rolling(w, min_periods=1).min(),
+                            pd.Series(raw).rolling(w, min_periods=1).max(),
+                            color=color, alpha=0.08)
+        if "hline" in sp:
+            ax.axhline(sp["hline"], color="#AAAAAA", ls="--", lw=1.0, alpha=0.6)
+        ax.set_ylim(*sp["ylim"])
+        ax.set_xlim(0, len(hr) - 1)
+        ax.set_xlabel("Time Period", fontsize=10)
+        ax.set_ylabel(sp["ylabel"], fontsize=10)
+        ax.set_title(f"Figure {sp['letter']}.  {sp['title']}", fontsize=12, fontweight="bold", loc="left")
+        ax.legend(fontsize=9, loc="best")
+        ax.tick_params(axis="both", labelsize=9)
+        fig.text(0.5, -0.03,
+            "Note: Lines smoothed with moving average for visual clarity. Shaded bands indicate raw period variance.",
+            ha="center", fontsize=8, color="#888888", style="italic")
+        plt.tight_layout()
+        plt.savefig(sp["fn"], dpi=300, bbox_inches="tight", facecolor="white")
+        print(f"Saved: {sp['fn']}")
+        plt.close()
+
+
+def main():
+    """Run the seeded manuscript simulation and save replication outputs."""
+    figures_dir = Path("figures")
+    outputs_dir = Path("outputs")
+    figures_dir.mkdir(exist_ok=True)
+    outputs_dir.mkdir(exist_ok=True)
+
+    print("=" * 65)
+    print("HIGH CREDIBILITY CERTIFIER SIMULATION")
+    print("=" * 65)
+    high_sim = ESGMarketSimulation(num_firms=500, num_periods=100, seed=42)
+    high_res = high_sim.run_simulation("high")
+    high_eq = high_sim.analyze_equilibrium(high_res)
+    print(f"  → {high_eq['equilibrium_type']}")
+    print(
+        f"     Greenwashing: {high_eq['avg_greenwashing']:.1%}  |  "
+        f"Investor Success: {high_eq['investment_success_rate']:.1%}  |  "
+        f"Trust: {high_eq['final_investor_trust']:.3f}"
+    )
+
+    print("\n" + "=" * 65)
+    print("LOW CREDIBILITY CERTIFIER SIMULATION")
+    print("=" * 65)
+    low_sim = ESGMarketSimulation(num_firms=500, num_periods=100, seed=42)
+    low_res = low_sim.run_simulation("low")
+    low_eq = low_sim.analyze_equilibrium(low_res)
+    print(f"  → {low_eq['equilibrium_type']}")
+    print(
+        f"     Greenwashing: {low_eq['avg_greenwashing']:.1%}  |  "
+        f"Investor Success: {low_eq['investment_success_rate']:.1%}  |  "
+        f"Trust: {low_eq['final_investor_trust']:.3f}"
+    )
+
+    # Save raw simulation outputs.
+    high_res.to_csv(outputs_dir / "high_credibility_results.csv", index=False)
+    low_res.to_csv(outputs_dir / "low_credibility_results.csv", index=False)
+
+    summary = pd.DataFrame([
+        {"scenario": "high_credibility", **high_eq},
+        {"scenario": "low_credibility", **low_eq},
+    ])
+    summary.to_csv(outputs_dir / "summary_results.csv", index=False)
+
+    print("\nGenerating figures...")
+    create_combined_figure(
+        high_res,
+        low_res,
+        high_eq,
+        low_eq,
+        figures_dir / "esg_combined_figure.png",
+    )
+    create_individual_figures(high_res, low_res, figures_dir / "esg_fig")
+
+    print("\nSaved outputs:")
+    print(f"  {outputs_dir / 'high_credibility_results.csv'}")
+    print(f"  {outputs_dir / 'low_credibility_results.csv'}")
+    print(f"  {outputs_dir / 'summary_results.csv'}")
+    print(f"  {figures_dir / 'esg_combined_figure.png'}")
+    print("\nDone.")
+
+
+if __name__ == "__main__":
+    main()
